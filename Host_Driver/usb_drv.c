@@ -1,6 +1,9 @@
 #include <linux/module.h>
 #include <linux/usb.h>
-#include <linux/slab.h> 
+#include <linux/slab.h>
+#include <linux/netlink.h>
+#include <net/sock.h>
+#define NETLINK_USER 31
 
 #define VENDOR_ID 0x0483
 #define PRODUCT_ID 0x1255
@@ -16,7 +19,40 @@ const struct usb_device_id usb_drv_id_table[] = {
 static struct usb_class_driver usb_drv_class;
 static struct usb_device *usb_drv_device;
 static __u8 *usb_buff;
+static struct sock *nl_sock;
+static int pid;
 
+// Send data via netlink socket to a process id with PID saved by nl_receive()
+// Effectively, to the last process that was sending data to this socket.
+static void nl_send(__u8 *buff, int length) {
+    struct sk_buff *skb_out = nlmsg_new(length, 0);
+    struct nlmsghdr *nlh;
+    int res;
+
+    if (!pid) {
+        printk("Recipient PID is not defined. The process must write to the socket first\n");
+    }
+    nlh = nlmsg_put(skb_out, 0, 0, NLMSG_DONE, length, 0);
+    NETLINK_CB(skb_out).dst_group = 0;
+    strncpy(nlmsg_data(nlh), buff, length);
+    res = nlmsg_unicast(nl_sock, skb_out, pid);
+    if (res < 0) {
+        printk("NLMSG error: %i\n", res);
+    }
+}
+
+// Callback for when a message is received via netlink
+static void nl_receive(struct sk_buff *skb) {
+    struct nlmsghdr *nlh;
+
+    nlh = (struct nlmsghdr*)skb->data;
+    pid = nlh->nlmsg_pid;
+    printk("Received message from pid %i: %s\n", pid, (char*)nlmsg_data(nlh));
+    nl_send("Hello there\n", strlen("Hello there\n"));
+}
+
+// Called when the device file is opened.
+// If not defined, it won't be possible to read or write to the file.
 int usb_drv_open(struct inode *i, struct file *f) {
     return 0;
 }
@@ -95,6 +131,8 @@ int usb_drv_probe (struct usb_interface *intf, const struct usb_device_id *id) {
     } else {
         printk("Minor obtained: %d\n", intf->minor);
     }
+
+    // Memory allocations for buffers and structures used later
     usb_buff = kmalloc(CTRL_REQ_LEN, GFP_KERNEL);
     return retval;
 }
@@ -113,13 +151,21 @@ struct usb_driver usb_drv = {
 };
 
 int __init usb_drv_init(void) {
+    struct netlink_kernel_cfg cfg = {
+        .input=nl_receive,
+    };
     printk("Initializing\n");
     usb_register(&usb_drv);
+    nl_sock = netlink_kernel_create(&init_net, NETLINK_USER, &cfg);
+    if (!nl_sock) {
+        printk("Unable to create socket\n");
+    }
     return 0;
 }
 
 void __exit usb_drv_exit(void) {
     printk("Exiting\n");
+    netlink_kernel_release(nl_sock);
     usb_deregister(&usb_drv);
 }
 
