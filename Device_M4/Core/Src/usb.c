@@ -1,10 +1,27 @@
 #include <stdio.h>
 #include "stm32f4xx_hal.h"
 #include "main.h"
+#include <string.h>
+
+/*
+ * Make sure to allocate FIFOs and start the peripheral in main.c
+ *
+ *   // Set FIFO number to activate,
+ *   // along with its size in 4-byte WORDS, e.g.
+ *   // 0x20 = 32 words = 128 bytes
+ *   HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 0, 0x20);
+ *   HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 1, 0x20);
+ *   HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 2, 0x20);
+ *   HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 3, 0x100);
+ *   HAL_PCDEx_SetRxFiFo(&hpcd_USB_OTG_FS, 0x40);
+ *   HAL_PCD_Start(&hpcd_USB_OTG_FS);
+ *
+ */
 
 extern PCD_HandleTypeDef hpcd_USB_OTG_FS;
 extern uint16_t xfer_buff[];	// Data to transmit to the host. The data itself is generated elsewhere.
-static int offset = 0;
+static uint8_t usb_buff[4];
+static int is_ctrl_receive_pending = 0;
 static const uint8_t int_packet_size = 48;		// Up to 64
 static const uint8_t blk_packet_size = 64;		// Up to 64
 static const uint16_t iso_packet_size = 280;	// Up to 1024
@@ -142,12 +159,15 @@ void HAL_PCD_SetupStageCallback(PCD_HandleTypeDef *hpcd) {
 		HAL_PCD_EP_Transmit(hpcd, 0, 0, 0);
 	}
 	if (request_type == CLASS_INPUT) {
-		printf("Requested transfer\n");
-		offset = 0;
-		is_xfer_requested = 1;
-		HAL_PCD_EP_Flush(&hpcd_USB_OTG_FS, 0x83);
+		printf("Control IN request\n");
+		sprintf((char*)usb_buff, "Hi!\n");
+		if (requested_length > strlen((char*)usb_buff)) requested_length = strlen((char*)usb_buff);
 
-
+		HAL_PCD_EP_Transmit(hpcd, 0, usb_buff, requested_length);
+	} else if (request_type == CLASS_OUTPUT) {
+		is_ctrl_receive_pending = 1;
+		HAL_PCD_EP_Receive(hpcd, 0, usb_buff, requested_length);
+		printf("Control OUT request with value %i\n", data1);
 		HAL_PCD_EP_Transmit(hpcd, 0, 0, 0);
 	}
 
@@ -166,6 +186,10 @@ void HAL_PCD_SetupStageCallback(PCD_HandleTypeDef *hpcd) {
 
 void HAL_PCD_DataOutStageCallback(PCD_HandleTypeDef *hpcd, uint8_t epnum) {
 	printf("Data OUT stage, ep %i\n", epnum);
+	if (is_ctrl_receive_pending) {
+		is_ctrl_receive_pending = 0;
+		printf("Received CTRL data: %s", usb_buff);
+	}
 
 //	if (is_xfer_requested) {
 //		printf("Sending first batch\n");
