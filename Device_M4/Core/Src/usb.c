@@ -173,28 +173,12 @@ void HAL_PCD_SetupStageCallback(PCD_HandleTypeDef *hpcd) {
 
 }
 
-//void HAL_PCD_SOFCallback(PCD_HandleTypeDef *hpcd) {
-//	if (is_xfer_requested>1) {
-//		printf("SOF\n");
-//		HAL_PCD_EP_Transmit(hpcd, 3, (uint8_t*)(&(frame_buff[is_img_requested++])), 8);
-//	}
-//	if (is_img_requested > 100) {
-//
-//		is_img_requested = 0;
-//	}
-//}
-
 void HAL_PCD_DataOutStageCallback(PCD_HandleTypeDef *hpcd, uint8_t epnum) {
 	printf("Data OUT stage, ep %i\n", epnum);
 	if (is_ctrl_receive_pending) {
 		is_ctrl_receive_pending = 0;
 		printf("Received CTRL data: %s", usb_buff);
 	}
-
-//	if (is_xfer_requested) {
-//		printf("Sending first batch\n");
-//		is_xfer_requested = 0;
-//	}
 }
 void HAL_PCD_DataInStageCallback(PCD_HandleTypeDef *hpcd, uint8_t epnum) {
 	printf("Data IN stage, ep %i\n", epnum);
