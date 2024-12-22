@@ -187,6 +187,15 @@ static void MX_USB_OTG_FS_PCD_Init(void)
   }
   /* USER CODE BEGIN USB_OTG_FS_Init 2 */
 
+  // Set FIFO number to activate,
+  // along with its size in 4-byte WORDS, e.g.
+  // 0x20 = 32 words = 128 bytes
+  HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 0, 0x20);
+  HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 1, 0x20);
+  HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 2, 0x20);
+  HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 3, 0x100);
+  HAL_PCDEx_SetRxFiFo(&hpcd_USB_OTG_FS, 0x40);
+  HAL_PCD_Start(&hpcd_USB_OTG_FS);
   /* USER CODE END USB_OTG_FS_Init 2 */
 
 }
