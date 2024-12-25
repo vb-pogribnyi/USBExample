@@ -8,6 +8,7 @@
 #define VENDOR_ID 0x0483
 #define PRODUCT_ID 0x1255
 #define DEV_FILE_NAME "usbdrv_%d"
+#define ISO_BUFF_LENGTH 1024*64
 
 #define CTRL_REQ_LEN 4
 
@@ -21,6 +22,46 @@ static struct usb_device *usb_drv_device;
 static __u8 *usb_buff;
 static struct sock *nl_sock;
 static int pid;
+struct urb *iso_urb;
+static __u8* usb_iso_buffer;
+
+int iso_rx_len = 0;
+int iso_packet_size = 8;
+int n_iso_packets = 16;
+int iso_retries = 0;
+
+
+static void iso_callback(struct urb* urb) {
+    int pkt_idx;
+    int i;
+    iso_rx_len += urb->actual_length;
+    printk("Iso data received: %i bytes (overall %i)\n", urb->actual_length, iso_rx_len);
+
+    /*
+    
+    iso_urb->number_of_packets = n_iso_packets;
+    for (i = 0; i < iso_urb->number_of_packets; i++) {
+        iso_urb->iso_frame_desc[i].offset = iso_packet_size * i;
+        iso_urb->iso_frame_desc[i].length = iso_packet_size;
+        */
+    for (pkt_idx = 0; pkt_idx < urb->number_of_packets; pkt_idx++) {
+        printk("Packet %i, offset %i, length %i\n", pkt_idx, urb->iso_frame_desc[pkt_idx].offset, urb->iso_frame_desc[pkt_idx].length);
+        for (i = 0; i < urb->iso_frame_desc[pkt_idx].length; i++) {
+            printk("0x%02x %i ", usb_iso_buffer[urb->iso_frame_desc[pkt_idx].offset + i], i);
+        }
+        iso_urb->iso_frame_desc[pkt_idx].offset = iso_packet_size * pkt_idx + iso_rx_len;
+        iso_urb->iso_frame_desc[pkt_idx].length = iso_packet_size;
+        printk("\n");
+    }
+    printk("\n");
+
+
+    if (urb->actual_length > 0) iso_retries = 0;
+    if (iso_rx_len > 500) return;
+
+    if (iso_retries++ > 3) return;
+    usb_submit_urb(urb, GFP_KERNEL);
+}
 
 // Send data via netlink socket to a process id with PID saved by nl_receive()
 // Effectively, to the last process that was sending data to this socket.
@@ -101,14 +142,33 @@ ssize_t usb_drv_write(struct file *f, const char __user *buff, size_t count, lof
     __u16 usb_index = 2;
     int request_len = CTRL_REQ_LEN;
     int ret = 0;
+    int i = 0;
     
     unsigned int ctrlpipe = usb_sndctrlpipe(usb_drv_device, 0);
+    unsigned int isopipe = usb_rcvisocpipe(usb_drv_device, 3);
 
-    printk("Writing to device\n");    
+    printk("Writing to device\n");
+    iso_rx_len = 0;
 
     ret = copy_from_user(usb_buff, buff, min((size_t)request_len, count));
+    usb_buff[0] = 1; // Hardcode iso transfer option
     usb_control_msg(usb_drv_device, ctrlpipe, usb_request, usb_requesttype, usb_value, 
         usb_index, usb_buff, request_len, 1000);
+
+    // Start receiving isochronous data
+    usb_fill_int_urb(iso_urb, usb_drv_device, isopipe, usb_iso_buffer,
+        iso_packet_size * n_iso_packets, iso_callback, 0, 1);
+    iso_urb->transfer_flags = URB_ISO_ASAP;
+    iso_urb->number_of_packets = n_iso_packets;
+    for (i = 0; i < iso_urb->number_of_packets; i++) {
+        iso_urb->iso_frame_desc[i].offset = iso_packet_size * i;
+        iso_urb->iso_frame_desc[i].length = iso_packet_size;
+    }
+
+    iso_retries = 0;
+    ret = usb_submit_urb(iso_urb, GFP_KERNEL);
+    printk("Sent ISO request with status %i\n", ret);
+
     // Number of bytes written. If less than 'count',
     // the function will be called again
     return count;
@@ -134,12 +194,16 @@ int usb_drv_probe (struct usb_interface *intf, const struct usb_device_id *id) {
 
     // Memory allocations for buffers and structures used later
     usb_buff = kmalloc(CTRL_REQ_LEN, GFP_KERNEL);
+    usb_iso_buffer = kmalloc(ISO_BUFF_LENGTH, GFP_KERNEL);
+    iso_urb = usb_alloc_urb(1, GFP_KERNEL);
     return retval;
 }
 
 void usb_drv_disconnect(struct usb_interface *intf) {
     printk("Disconnecting device\n");
+    usb_free_urb(iso_urb);
     kfree(usb_buff);
+    kfree(usb_iso_buffer);
     usb_deregister_dev(intf, &usb_drv_class);
 }
 
