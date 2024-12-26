@@ -34,12 +34,19 @@ def nl_read_img():
 		nl_hdr = response[:16]
 		length, msg_type, flags, seq, pid = struct.unpack("IHHII", nl_hdr)
 		length -= 16  # Header does not count
-		# print(length, msg_type, flags, seq, pid)
-		data = np.frombuffer(response[16:], dtype=np.uint8);
+		print(length, msg_type, flags, seq, pid)
+		if msg_type == NLMSG_DONE:
+			img_len = np.frombuffer(response[16:], dtype=np.int32)
+			print(img_len)
+			if img_len > 0:
+				exit()
+			break
+		data = np.frombuffer(response[16:], dtype=np.uint8)
+		print(data)
 		screen_buffer[buff_idx*3:buff_idx*3 + length*3] = data.repeat(3)
 		buff_idx += length
-		if buff_idx*3 >= len(screen_buffer):
-			break
+		# if buff_idx*3 >= len(screen_buffer):
+		# 	break
 
 while is_running:
 	print('.')

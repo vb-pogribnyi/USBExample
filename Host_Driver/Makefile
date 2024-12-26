@@ -1,4 +1,5 @@
 obj-m := usb_drv.o
+ccflags-y += -fsanitize=kernel-address
 
 KERN_DIR=/lib/modules/$(shell uname -r)/build
 

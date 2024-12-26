@@ -8,7 +8,7 @@
 #define VENDOR_ID 0x0483
 #define PRODUCT_ID 0x1255
 #define DEV_FILE_NAME "usbdrv_%d"
-#define ISO_BUFF_LENGTH (320*240)
+#define ISO_BUFF_LENGTH 2048
 
 #define CTRL_REQ_LEN 4
 
@@ -26,6 +26,7 @@ struct urb *iso_urb;
 static __u8* usb_iso_buffer;
 
 int iso_rx_len = 0;
+int iso_rx_read = 0;
 int iso_packet_size = 128;
 int n_iso_packets = 16;
 int iso_retries = 0;
@@ -69,7 +70,7 @@ static void iso_callback(struct urb* urb) {
 
 // Send data via netlink socket to a process id with PID saved by nl_receive()
 // Effectively, to the last process that was sending data to this socket.
-static void nl_send(__u8 *buff, int length) {
+static void nl_send(__u8 *buff, int length, int type) {
     struct sk_buff *skb_out = nlmsg_new(length, 0);
     struct nlmsghdr *nlh;
     int res;
@@ -77,7 +78,7 @@ static void nl_send(__u8 *buff, int length) {
     if (!pid) {
         printk("Recipient PID is not defined. The process must write to the socket first\n");
     }
-    nlh = nlmsg_put(skb_out, 0, 0, NLMSG_DONE, length, 0);
+    nlh = nlmsg_put(skb_out, 0, 0, type, length, 0);
     NETLINK_CB(skb_out).dst_group = 0;
     memcpy(nlmsg_data(nlh), buff, length);
     res = nlmsg_unicast(nl_sock, skb_out, pid);
@@ -90,8 +91,9 @@ static void nl_send(__u8 *buff, int length) {
 static void nl_receive(struct sk_buff *skb) {
     struct nlmsghdr *nlh;
     static int packet_size = 512;
+    int touser_len;
     char* msg;
-    int i;
+    int read_len;
 
     nlh = (struct nlmsghdr*)skb->data;
     pid = nlh->nlmsg_pid;
@@ -99,9 +101,14 @@ static void nl_receive(struct sk_buff *skb) {
     printk("Received message from pid %i: %s\n", pid, msg);
     // nl_send("Hello there\n", strlen("Hello there\n"));
     if (msg[0] == 'I' && msg[1] == 'M' && msg[2] == 'G') {
-        for (i = 0; i < ISO_BUFF_LENGTH; i += packet_size) {
-            nl_send(usb_iso_buffer + i, packet_size);
+        // Send contents of usb_iso_buffer from 'iso_rx_read' to 'iso_rx_len'
+        read_len = iso_rx_len - iso_rx_read;
+        while (iso_rx_read < iso_rx_len) {
+            touser_len = min(iso_rx_len - iso_rx_read, packet_size);
+            nl_send(usb_iso_buffer + iso_rx_read, touser_len, NLMSG_NOOP);
+            iso_rx_read += touser_len;
         }
+        nl_send((uint8_t*)&read_len, sizeof(read_len), NLMSG_DONE);
     }
 }
 
@@ -161,7 +168,6 @@ ssize_t usb_drv_write(struct file *f, const char __user *buff, size_t count, lof
     unsigned int isopipe = usb_rcvisocpipe(usb_drv_device, 3);
 
     printk("Writing to device\n");
-    iso_rx_len = 0;
 
     ret = copy_from_user(usb_buff, buff, min((size_t)request_len, count));
     usb_buff[0] = 1; // Hardcode iso transfer option
@@ -169,6 +175,8 @@ ssize_t usb_drv_write(struct file *f, const char __user *buff, size_t count, lof
         usb_index, usb_buff, request_len, 1000);
 
     // Start receiving isochronous data
+    iso_rx_len = 0;
+    iso_rx_read = 0;
     usb_fill_int_urb(iso_urb, usb_drv_device, isopipe, usb_iso_buffer,
         iso_packet_size * n_iso_packets, iso_callback, 0, 1);
     iso_urb->transfer_flags = URB_ISO_ASAP;
@@ -209,6 +217,7 @@ int usb_drv_probe (struct usb_interface *intf, const struct usb_device_id *id) {
     // Memory allocations for buffers and structures used later
     printk("Allocating usb_buff\n");
     usb_buff = kmalloc(CTRL_REQ_LEN, GFP_KERNEL);
+    if (!usb_buff) printk("Could not allocate memory for usb_buff");
     // printk("Allocating usb_iso_buffer\n");
     // usb_iso_buffer = kmalloc(ISO_BUFF_LENGTH, GFP_KERNEL);
     // for (i = 0; i < ISO_BUFF_LENGTH; i++) {
@@ -216,6 +225,7 @@ int usb_drv_probe (struct usb_interface *intf, const struct usb_device_id *id) {
     // }
     printk("Allocating URB\n");
     iso_urb = usb_alloc_urb(1, GFP_KERNEL);
+    if (!usb_buff) printk("Could not allocate memory for iso_urb");
     return retval;
 }
 
@@ -248,9 +258,7 @@ int __init usb_drv_init(void) {
     }
     printk("Allocating usb_iso_buffer\n");
     usb_iso_buffer = kmalloc(ISO_BUFF_LENGTH, GFP_KERNEL);
-    for (i = 0; i < ISO_BUFF_LENGTH; i++) {
-        usb_iso_buffer[i] = (uint8_t)i;
-    }
+    if (!usb_buff) printk("Could not allocate memory for usb_iso_buffer");
     return 0;
 }
 
