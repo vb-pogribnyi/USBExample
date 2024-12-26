@@ -8,7 +8,7 @@
 #define VENDOR_ID 0x0483
 #define PRODUCT_ID 0x1255
 #define DEV_FILE_NAME "usbdrv_%d"
-#define ISO_BUFF_LENGTH 1024*64
+#define ISO_BUFF_LENGTH (320*240)
 
 #define CTRL_REQ_LEN 4
 
@@ -26,7 +26,7 @@ struct urb *iso_urb;
 static __u8* usb_iso_buffer;
 
 int iso_rx_len = 0;
-int iso_packet_size = 8;
+int iso_packet_size = 128;
 int n_iso_packets = 16;
 int iso_retries = 0;
 
@@ -45,8 +45,12 @@ static void iso_callback(struct urb* urb) {
         iso_urb->iso_frame_desc[i].length = iso_packet_size;
         */
     for (pkt_idx = 0; pkt_idx < urb->number_of_packets; pkt_idx++) {
-        printk("Packet %i, offset %i, length %i\n", pkt_idx, urb->iso_frame_desc[pkt_idx].offset, urb->iso_frame_desc[pkt_idx].length);
-        for (i = 0; i < urb->iso_frame_desc[pkt_idx].length; i++) {
+        printk("Packet %i, offset %i, length %i, actual length %i\n", 
+                pkt_idx, 
+                urb->iso_frame_desc[pkt_idx].offset, 
+                urb->iso_frame_desc[pkt_idx].length, 
+                urb->iso_frame_desc[pkt_idx].actual_length);
+        for (i = 0; i < urb->iso_frame_desc[pkt_idx].actual_length; i++) {
             printk("0x%02x %i ", usb_iso_buffer[urb->iso_frame_desc[pkt_idx].offset + i], i);
         }
         iso_urb->iso_frame_desc[pkt_idx].offset = iso_packet_size * pkt_idx + iso_rx_len;
@@ -75,7 +79,7 @@ static void nl_send(__u8 *buff, int length) {
     }
     nlh = nlmsg_put(skb_out, 0, 0, NLMSG_DONE, length, 0);
     NETLINK_CB(skb_out).dst_group = 0;
-    strncpy(nlmsg_data(nlh), buff, length);
+    memcpy(nlmsg_data(nlh), buff, length);
     res = nlmsg_unicast(nl_sock, skb_out, pid);
     if (res < 0) {
         printk("NLMSG error: %i\n", res);
@@ -85,11 +89,20 @@ static void nl_send(__u8 *buff, int length) {
 // Callback for when a message is received via netlink
 static void nl_receive(struct sk_buff *skb) {
     struct nlmsghdr *nlh;
+    static int packet_size = 512;
+    char* msg;
+    int i;
 
     nlh = (struct nlmsghdr*)skb->data;
     pid = nlh->nlmsg_pid;
-    printk("Received message from pid %i: %s\n", pid, (char*)nlmsg_data(nlh));
-    nl_send("Hello there\n", strlen("Hello there\n"));
+    msg = (char*)nlmsg_data(nlh);
+    printk("Received message from pid %i: %s\n", pid, msg);
+    // nl_send("Hello there\n", strlen("Hello there\n"));
+    if (msg[0] == 'I' && msg[1] == 'M' && msg[2] == 'G') {
+        for (i = 0; i < ISO_BUFF_LENGTH; i += packet_size) {
+            nl_send(usb_iso_buffer + i, packet_size);
+        }
+    }
 }
 
 // Called when the device file is opened.
@@ -182,6 +195,7 @@ struct file_operations fops = {
 
 int usb_drv_probe (struct usb_interface *intf, const struct usb_device_id *id) {
     int retval = 0;
+    // int i;
     printk("Probing device\n");
     usb_drv_device = interface_to_usbdev(intf);
     usb_drv_class.name = DEV_FILE_NAME;
@@ -193,8 +207,14 @@ int usb_drv_probe (struct usb_interface *intf, const struct usb_device_id *id) {
     }
 
     // Memory allocations for buffers and structures used later
+    printk("Allocating usb_buff\n");
     usb_buff = kmalloc(CTRL_REQ_LEN, GFP_KERNEL);
-    usb_iso_buffer = kmalloc(ISO_BUFF_LENGTH, GFP_KERNEL);
+    // printk("Allocating usb_iso_buffer\n");
+    // usb_iso_buffer = kmalloc(ISO_BUFF_LENGTH, GFP_KERNEL);
+    // for (i = 0; i < ISO_BUFF_LENGTH; i++) {
+    //     usb_iso_buffer[i] = (uint8_t)i;
+    // }
+    printk("Allocating URB\n");
     iso_urb = usb_alloc_urb(1, GFP_KERNEL);
     return retval;
 }
@@ -203,7 +223,7 @@ void usb_drv_disconnect(struct usb_interface *intf) {
     printk("Disconnecting device\n");
     usb_free_urb(iso_urb);
     kfree(usb_buff);
-    kfree(usb_iso_buffer);
+    // kfree(usb_iso_buffer);
     usb_deregister_dev(intf, &usb_drv_class);
 }
 
@@ -218,17 +238,25 @@ int __init usb_drv_init(void) {
     struct netlink_kernel_cfg cfg = {
         .input=nl_receive,
     };
+    int i;
+    
     printk("Initializing\n");
     usb_register(&usb_drv);
     nl_sock = netlink_kernel_create(&init_net, NETLINK_USER, &cfg);
     if (!nl_sock) {
         printk("Unable to create socket\n");
     }
+    printk("Allocating usb_iso_buffer\n");
+    usb_iso_buffer = kmalloc(ISO_BUFF_LENGTH, GFP_KERNEL);
+    for (i = 0; i < ISO_BUFF_LENGTH; i++) {
+        usb_iso_buffer[i] = (uint8_t)i;
+    }
     return 0;
 }
 
 void __exit usb_drv_exit(void) {
     printk("Exiting\n");
+    kfree(usb_iso_buffer);
     netlink_kernel_release(nl_sock);
     usb_deregister(&usb_drv);
 }
