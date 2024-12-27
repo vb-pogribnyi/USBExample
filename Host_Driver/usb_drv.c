@@ -3,12 +3,14 @@
 #include <linux/slab.h>
 #include <linux/netlink.h>
 #include <net/sock.h>
+#include <linux/fixp-arith.h>
 #define NETLINK_USER 31
+#define NLMSG_ENDIMG 0x04
 
 #define VENDOR_ID 0x0483
 #define PRODUCT_ID 0x1255
 #define DEV_FILE_NAME "usbdrv_%d"
-#define ISO_BUFF_LENGTH 2048
+#define ISO_BUFF_LENGTH 1920
 
 #define CTRL_REQ_LEN 4
 
@@ -31,42 +33,45 @@ int iso_packet_size = 128;
 int n_iso_packets = 16;
 int iso_retries = 0;
 
+int img_w = 320;
+int img_h = 240;
 
-static void iso_callback(struct urb* urb) {
-    int pkt_idx;
-    int i;
-    iso_rx_len += urb->actual_length;
-    printk("Iso data received: %i bytes (overall %i)\n", urb->actual_length, iso_rx_len);
 
-    /*
+// static void iso_callback(struct urb* urb) {
+//     int pkt_idx;
+//     int i;
+//     iso_rx_len += urb->actual_length;
+//     printk("Iso data received: %i bytes (overall %i)\n", urb->actual_length, iso_rx_len);
+
+//     /*
     
-    iso_urb->number_of_packets = n_iso_packets;
-    for (i = 0; i < iso_urb->number_of_packets; i++) {
-        iso_urb->iso_frame_desc[i].offset = iso_packet_size * i;
-        iso_urb->iso_frame_desc[i].length = iso_packet_size;
-        */
-    for (pkt_idx = 0; pkt_idx < urb->number_of_packets; pkt_idx++) {
-        printk("Packet %i, offset %i, length %i, actual length %i\n", 
-                pkt_idx, 
-                urb->iso_frame_desc[pkt_idx].offset, 
-                urb->iso_frame_desc[pkt_idx].length, 
-                urb->iso_frame_desc[pkt_idx].actual_length);
-        for (i = 0; i < urb->iso_frame_desc[pkt_idx].actual_length; i++) {
-            printk("0x%02x %i ", usb_iso_buffer[urb->iso_frame_desc[pkt_idx].offset + i], i);
-        }
-        iso_urb->iso_frame_desc[pkt_idx].offset = iso_packet_size * pkt_idx + iso_rx_len;
-        iso_urb->iso_frame_desc[pkt_idx].length = iso_packet_size;
-        printk("\n");
-    }
-    printk("\n");
+//     iso_urb->number_of_packets = n_iso_packets;
+//     for (i = 0; i < iso_urb->number_of_packets; i++) {
+//         iso_urb->iso_frame_desc[i].offset = iso_packet_size * i;
+//         iso_urb->iso_frame_desc[i].length = iso_packet_size;
+//         */
+//     for (pkt_idx = 0; pkt_idx < urb->number_of_packets; pkt_idx++) {
+//         printk("Packet %i, offset %i, length %i, actual length %i\n", 
+//                 pkt_idx, 
+//                 urb->iso_frame_desc[pkt_idx].offset, 
+//                 urb->iso_frame_desc[pkt_idx].length, 
+//                 urb->iso_frame_desc[pkt_idx].actual_length);
+//         for (i = 0; i < urb->iso_frame_desc[pkt_idx].actual_length; i++) {
+//             printk("0x%02x %i ", usb_iso_buffer[urb->iso_frame_desc[pkt_idx].offset + i], i);
+//         }
+//         iso_urb->iso_frame_desc[pkt_idx].offset = iso_packet_size * pkt_idx + iso_rx_len;
+//         iso_urb->iso_frame_desc[pkt_idx].length = iso_packet_size;
+//         printk("\n");
+//     }
+//     printk("\n");
 
 
-    if (urb->actual_length > 0) iso_retries = 0;
-    if (iso_rx_len > 500) return;
+//     if (urb->actual_length > 0) iso_retries = 0;
+//     if (iso_rx_len > 500) return;
 
-    if (iso_retries++ > 3) return;
-    usb_submit_urb(urb, GFP_KERNEL);
-}
+//     if (iso_retries++ > 3) return;
+//     usb_submit_urb(urb, GFP_KERNEL);
+// }
 
 // Send data via netlink socket to a process id with PID saved by nl_receive()
 // Effectively, to the last process that was sending data to this socket.
@@ -94,21 +99,35 @@ static void nl_receive(struct sk_buff *skb) {
     int touser_len;
     char* msg;
     int read_len;
+    int msg_type = NLMSG_NOOP;
 
     nlh = (struct nlmsghdr*)skb->data;
     pid = nlh->nlmsg_pid;
     msg = (char*)nlmsg_data(nlh);
-    printk("Received message from pid %i: %s\n", pid, msg);
+    // printk("Received message from pid %i: %s\n", pid, msg);
     // nl_send("Hello there\n", strlen("Hello there\n"));
     if (msg[0] == 'I' && msg[1] == 'M' && msg[2] == 'G') {
         // Send contents of usb_iso_buffer from 'iso_rx_read' to 'iso_rx_len'
         read_len = iso_rx_len - iso_rx_read;
         while (iso_rx_read < iso_rx_len) {
             touser_len = min(iso_rx_len - iso_rx_read, packet_size);
-            nl_send(usb_iso_buffer + iso_rx_read, touser_len, NLMSG_NOOP);
-            iso_rx_read += touser_len;
+            if ((iso_rx_read % ISO_BUFF_LENGTH) + touser_len >= ISO_BUFF_LENGTH) {
+                printk("Truncating the image\n");
+                touser_len = ISO_BUFF_LENGTH - (iso_rx_read % ISO_BUFF_LENGTH);
+            }
+            if (touser_len > 0) {
+                printk("Sending %i bytes\n", touser_len);
+                nl_send(usb_iso_buffer + (iso_rx_read % ISO_BUFF_LENGTH), touser_len, msg_type);
+                iso_rx_read += touser_len;
+            }
         }
-        nl_send((uint8_t*)&read_len, sizeof(read_len), NLMSG_DONE);
+        msg_type = NLMSG_DONE;
+        if (iso_rx_read >= img_w * img_h) {
+            msg_type = NLMSG_ENDIMG ;
+            iso_rx_read = iso_rx_len = 0;
+            printk("Resetting offset\n");
+        }
+        nl_send((uint8_t*)&read_len, sizeof(read_len), msg_type);
     }
 }
 
@@ -165,7 +184,7 @@ ssize_t usb_drv_write(struct file *f, const char __user *buff, size_t count, lof
     int i = 0;
     
     unsigned int ctrlpipe = usb_sndctrlpipe(usb_drv_device, 0);
-    unsigned int isopipe = usb_rcvisocpipe(usb_drv_device, 3);
+    // unsigned int isopipe = usb_rcvisocpipe(usb_drv_device, 3);
 
     printk("Writing to device\n");
 
@@ -174,21 +193,25 @@ ssize_t usb_drv_write(struct file *f, const char __user *buff, size_t count, lof
     usb_control_msg(usb_drv_device, ctrlpipe, usb_request, usb_requesttype, usb_value, 
         usb_index, usb_buff, request_len, 1000);
 
-    // Start receiving isochronous data
-    iso_rx_len = 0;
-    iso_rx_read = 0;
-    usb_fill_int_urb(iso_urb, usb_drv_device, isopipe, usb_iso_buffer,
-        iso_packet_size * n_iso_packets, iso_callback, 0, 1);
-    iso_urb->transfer_flags = URB_ISO_ASAP;
-    iso_urb->number_of_packets = n_iso_packets;
-    for (i = 0; i < iso_urb->number_of_packets; i++) {
-        iso_urb->iso_frame_desc[i].offset = iso_packet_size * i;
-        iso_urb->iso_frame_desc[i].length = iso_packet_size;
-    }
+    // // Start receiving isochronous data
+    // iso_rx_len = 0;
+    // iso_rx_read = 0;
+    // usb_fill_int_urb(iso_urb, usb_drv_device, isopipe, usb_iso_buffer,
+    //     iso_packet_size * n_iso_packets, iso_callback, 0, 1);
+    // iso_urb->transfer_flags = URB_ISO_ASAP;
+    // iso_urb->number_of_packets = n_iso_packets;
+    // for (i = 0; i < iso_urb->number_of_packets; i++) {
+    //     iso_urb->iso_frame_desc[i].offset = iso_packet_size * i;
+    //     iso_urb->iso_frame_desc[i].length = iso_packet_size;
+    // }
 
-    iso_retries = 0;
-    ret = usb_submit_urb(iso_urb, GFP_KERNEL);
-    printk("Sent ISO request with status %i\n", ret);
+    // iso_retries = 0;
+    // ret = usb_submit_urb(iso_urb, GFP_KERNEL);
+    // printk("Sent ISO request with status %i\n", ret);
+    for (i = 0; i < ISO_BUFF_LENGTH; i++) {
+        usb_iso_buffer[i] = fixp_linear_interpolate(0, 0, img_w, 255, i%img_w);
+        iso_rx_len++;
+    }
 
     // Number of bytes written. If less than 'count',
     // the function will be called again
@@ -248,7 +271,6 @@ int __init usb_drv_init(void) {
     struct netlink_kernel_cfg cfg = {
         .input=nl_receive,
     };
-    int i;
     
     printk("Initializing\n");
     usb_register(&usb_drv);
